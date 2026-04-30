@@ -1,6 +1,6 @@
- <?php
+<?php
 require_once '../includes/auth.php';
-requireRole('professor');
+requireRole('student');
 
 $user = getUserData($_SESSION['user_id']);
 
@@ -14,14 +14,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'update_profile') {
         $fullname = trim($_POST['fullname'] ?? '');
         $email = trim($_POST['email'] ?? '');
+        $section = trim($_POST['section'] ?? '');
         
         if (empty($fullname) || empty($email)) {
             $error = 'Please fill in all fields';
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $error = 'Please enter a valid email address';
         } else {
-            $stmt = $pdo->prepare("UPDATE users SET fullname = ?, email = ? WHERE user_id = ?");
-            if ($stmt->execute([$fullname, $email, $user['user_id']])) {
+            $stmt = $pdo->prepare("UPDATE users SET fullname = ?, email = ?, section = ? WHERE user_id = ?");
+            if ($stmt->execute([$fullname, $email, $section, $user['user_id']])) {
                 $_SESSION['fullname'] = $fullname;
                 $message = 'Profile updated successfully!';
                 $user = getUserData($_SESSION['user_id']);
@@ -43,7 +44,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($new_password !== $confirm_password) {
             $error = 'New passwords do not match';
         } else {
-            // Verify current password
             $stmt = $pdo->prepare("SELECT password FROM users WHERE user_id = ?");
             $stmt->execute([$user['user_id']]);
             $db_password = $stmt->fetch()['password'];
@@ -70,7 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             if (in_array($ext, $allowed)) {
                 $picture = time() . '_' . preg_replace('/[^a-zA-Z0-9]/', '_', $user['user_id']) . '.' . $ext;
-                $upload_path = '../uploads/professors/';
+                $upload_path = '../uploads/students/';
                 
                 if (!file_exists($upload_path)) {
                     mkdir($upload_path, 0777, true);
@@ -96,28 +96,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get professor's schedule subjects
+// Get subjects taken
 $stmt = $pdo->prepare("
-    SELECT DISTINCT sub.subject_code, sub.descriptive_title 
-    FROM schedules s
-    JOIN subjects sub ON s.subject_id = sub.id
-    WHERE s.professor_id = ?
+    SELECT s.subject_code, s.descriptive_title, s.units, s.year_level, s.semester, g.grade, g.status
+    FROM subjects s
+    LEFT JOIN grades g ON s.id = g.subject_id AND g.student_id = ?
+    WHERE s.course = ?
+    ORDER BY s.year_level, s.semester
 ");
-$stmt->execute([$user['user_id']]);
-$subjects_handled = $stmt->fetchAll();
+$stmt->execute([$user['user_id'], $user['course']]);
+$subjects_taken = $stmt->fetchAll();
 
-// Get statistics
-$stmt = $pdo->prepare("SELECT COUNT(DISTINCT subject_id) as total_subjects FROM schedules WHERE professor_id = ?");
-$stmt->execute([$user['user_id']]);
-$total_subjects = $stmt->fetch()['total_subjects'];
-
-$stmt = $pdo->prepare("SELECT COUNT(*) as total_classes FROM schedules WHERE professor_id = ?");
-$stmt->execute([$user['user_id']]);
-$total_classes = $stmt->fetch()['total_classes'];
-
-$picture_path = '../uploads/professors/' . ($user['picture'] ?? 'default.png');
+$picture_path = '../uploads/students/' . ($user['picture'] ?? 'default.png');
 if (!file_exists($picture_path)) {
-    $picture_path = '../uploads/professors/default.png';
+    $picture_path = '../uploads/students/default.png';
 }
 ?>
 <!DOCTYPE html>
@@ -125,13 +117,13 @@ if (!file_exists($picture_path)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Professor Information - Academic Advising System</title>
+    <title>Student Information - Academic Advising System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
-            --primary: #667eea;
-            --secondary: #764ba2;
+            --primary: #00A7E1;
+            --secondary: #F17720;
         }
         .profile-card {
             background: white;
@@ -195,48 +187,45 @@ if (!file_exists($picture_path)) {
             font-weight: 600;
             color: #2d3748;
         }
-        .stat-box {
-            background: #f7fafc;
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-            transition: transform 0.3s;
-        }
-        .stat-box:hover {
-            transform: translateY(-5px);
-        }
-        .stat-number {
-            font-size: 28px;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        .stat-label {
-            font-size: 13px;
-            color: #718096;
-        }
-        .subject-tag {
-            background: #e8f0fe;
-            color: var(--primary);
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 13px;
-            display: inline-block;
-            margin: 3px;
-        }
         .btn-edit {
             background: linear-gradient(135deg, var(--primary), var(--secondary));
             border: none;
-            padding: 10px 25px;
+            padding: 8px 20px;
             border-radius: 25px;
             color: white;
+            font-size: 14px;
         }
         .btn-edit:hover {
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102,126,234,0.4);
+            box-shadow: 0 5px 15px rgba(0,167,225,0.4);
             color: white;
         }
         .picture-upload {
             display: none;
+        }
+        .status-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-passed {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .table-subjects {
+            font-size: 14px;
+        }
+        .table-subjects th {
+            background: #f8f9fa;
         }
     </style>
 </head>
@@ -260,7 +249,7 @@ if (!file_exists($picture_path)) {
     <?php endif; ?>
 
     <div class="row">
-        <!-- Left Column - Profile Picture & Stats -->
+        <!-- Left Column - Profile Picture -->
         <div class="col-md-4">
             <div class="profile-card">
                 <div class="profile-header">
@@ -280,21 +269,6 @@ if (!file_exists($picture_path)) {
                         <input type="file" name="picture" id="pictureUpload" class="picture-upload" accept="image/*">
                         <input type="hidden" name="action" value="update_picture">
                     </form>
-                    
-                    <div class="row mt-3">
-                        <div class="col-6">
-                            <div class="stat-box">
-                                <div class="stat-number"><?php echo $total_subjects; ?></div>
-                                <div class="stat-label">Subjects Handled</div>
-                            </div>
-                        </div>
-                        <div class="col-6">
-                            <div class="stat-box">
-                                <div class="stat-number"><?php echo $total_classes; ?></div>
-                                <div class="stat-label">Total Classes</div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -311,7 +285,7 @@ if (!file_exists($picture_path)) {
                 </div>
                 <div class="row">
                     <div class="col-md-6 mb-3">
-                        <div class="info-label">Professor ID</div>
+                        <div class="info-label">Student ID</div>
                         <div class="info-value"><?php echo htmlspecialchars($user['user_id']); ?></div>
                     </div>
                     <div class="col-md-6 mb-3">
@@ -323,10 +297,20 @@ if (!file_exists($picture_path)) {
                         <div class="info-value"><?php echo htmlspecialchars($user['email']); ?></div>
                     </div>
                     <div class="col-md-6 mb-3">
-                        <div class="info-label">Role</div>
+                        <div class="info-label">Course</div>
                         <div class="info-value">
-                            <span class="badge bg-primary">Professor</span>
+                            <?php echo $user['course'] == 'CE' ? 'Civil Engineering' : 'Computer Engineering'; ?>
                         </div>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <div class="info-label">Year Level</div>
+                        <div class="info-value">
+                            <?php echo $user['year_level']; ?> Year
+                        </div>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <div class="info-label">Section</div>
+                        <div class="info-value">Section <?php echo htmlspecialchars($user['section']); ?></div>
                     </div>
                     <div class="col-md-6 mb-3">
                         <div class="info-label">Status</div>
@@ -337,26 +321,55 @@ if (!file_exists($picture_path)) {
                         </div>
                     </div>
                     <div class="col-md-6 mb-3">
-                        <div class="info-label">Member Since</div>
+                        <div class="info-label">Enrolled Since</div>
                         <div class="info-value"><?php echo date('F d, Y', strtotime($user['created_at'])); ?></div>
                     </div>
                 </div>
             </div>
 
-            <!-- Subjects Handled Card -->
+            <!-- Subjects Taken Card -->
             <div class="info-card">
-                <h5><i class="fas fa-book me-2 text-primary"></i>Subjects Handled</h5>
-                <?php if($subjects_handled): ?>
-                    <div class="mt-3">
-                        <?php foreach($subjects_handled as $subject): ?>
-                            <span class="subject-tag">
-                                <i class="fas fa-code me-1"></i><?php echo htmlspecialchars($subject['subject_code']); ?> - <?php echo htmlspecialchars($subject['descriptive_title']); ?>
-                            </span>
-                        <?php endforeach; ?>
-                    </div>
-                <?php else: ?>
-                    <p class="text-muted text-center py-3">No subjects assigned yet.</p>
-                <?php endif; ?>
+                <h5><i class="fas fa-book me-2 text-primary"></i>Subjects Taken</h5>
+                <div class="table-responsive">
+                    <table class="table table-hover table-subjects">
+                        <thead>
+                            <tr>
+                                <th>Subject Code</th>
+                                <th>Descriptive Title</th>
+                                <th>Units</th>
+                                <th>Year/Sem</th>
+                                <th>Grade</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach($subjects_taken as $subject): ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars($subject['subject_code']); ?></td>
+                                    <td><?php echo htmlspecialchars($subject['descriptive_title']); ?></td>
+                                    <td class="text-center"><?php echo $subject['units']; ?></td>
+                                    <td class="text-center"><?php echo $subject['year_level'] . '/' . ($subject['semester'] == 1 ? '1st' : '2nd'); ?></td>
+                                    <td class="text-center">
+                                        <?php if($subject['grade']): ?>
+                                            <strong><?php echo number_format($subject['grade'], 2); ?></strong>
+                                        <?php else: ?>
+                                            <span class="text-muted">—</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <?php if($subject['status'] == 'PASSED'): ?>
+                                            <span class="status-badge status-passed">PASSED</span>
+                                        <?php elseif($subject['status'] == 'FAILED'): ?>
+                                            <span class="status-badge status-failed">FAILED</span>
+                                        <?php else: ?>
+                                            <span class="status-badge status-pending">PENDING</span>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Change Password Card -->
@@ -374,7 +387,7 @@ if (!file_exists($picture_path)) {
 <div class="modal fade" id="editProfileModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header" style="background: linear-gradient(135deg, #667eea, #764ba2); color: white;">
+            <div class="modal-header" style="background: linear-gradient(135deg, #00A7E1, #F17720); color: white;">
                 <h5 class="modal-title"><i class="fas fa-edit me-2"></i>Edit Profile</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
@@ -388,6 +401,15 @@ if (!file_exists($picture_path)) {
                     <div class="mb-3">
                         <label class="form-label">Email Address</label>
                         <input type="email" name="email" class="form-control" value="<?php echo htmlspecialchars($user['email']); ?>" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Section</label>
+                        <select name="section" class="form-select">
+                            <option value="A" <?php echo $user['section'] == 'A' ? 'selected' : ''; ?>>Section A</option>
+                            <option value="B" <?php echo $user['section'] == 'B' ? 'selected' : ''; ?>>Section B</option>
+                            <option value="C" <?php echo $user['section'] == 'C' ? 'selected' : ''; ?>>Section C</option>
+                            <option value="D" <?php echo $user['section'] == 'D' ? 'selected' : ''; ?>>Section D</option>
+                        </select>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -403,7 +425,7 @@ if (!file_exists($picture_path)) {
 <div class="modal fade" id="changePasswordModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header" style="background: linear-gradient(135deg, #667eea, #764ba2); color: white;">
+            <div class="modal-header" style="background: linear-gradient(135deg, #00A7E1, #F17720); color: white;">
                 <h5 class="modal-title"><i class="fas fa-key me-2"></i>Change Password</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>

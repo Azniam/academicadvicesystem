@@ -1,6 +1,6 @@
 <?php
 require_once '../includes/auth.php';
-requireRole('professor');
+requireRole('student');
 
 $user = getUserData($_SESSION['user_id']);
 
@@ -13,48 +13,152 @@ while ($row = $stmt->fetch()) {
 $currentSchoolYear = $settings['current_school_year'] ?? '2024-2025';
 $currentSemester = $settings['current_semester'] ?? '1';
 
-// Get professor's schedule
+// Get student's grades summary
 $stmt = $pdo->prepare("
-    SELECT s.*, sub.subject_code, sub.descriptive_title, sub.units,
-           r.room_code
-    FROM schedules s
-    JOIN subjects sub ON s.subject_id = sub.id
-    JOIN rooms r ON s.room_id = r.id
-    WHERE s.professor_id = ?
-    ORDER BY FIELD(s.day, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'), s.start_time
+    SELECT 
+        COUNT(*) as total_subjects,
+        SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) as passed,
+        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed,
+        AVG(CASE WHEN grade IS NOT NULL THEN grade END) as average_grade
+    FROM grades 
+    WHERE student_id = ?
 ");
 $stmt->execute([$user['user_id']]);
-$schedules = $stmt->fetchAll();
+$gradeSummary = $stmt->fetch();
 
-// Get total students advised (if professor is assigned as advisor)
-$stmt = $pdo->prepare("SELECT COUNT(*) as total FROM users WHERE role = 'student'");
-$stmt->execute();  // ← ADD THIS LINE
-$result = $stmt->fetch();
-$totalStudents = $result ? $result['total'] : 0;
+// Get current subjects based on year level and semester
+$stmt = $pdo->prepare("
+    SELECT s.* 
+    FROM subjects s
+    WHERE s.course = ? 
+    AND s.year_level = ? 
+    AND s.semester = ?
+    ORDER BY s.subject_code
+");
+$stmt->execute([$user['course'], $user['year_level'], $currentSemester]);
+$currentSubjects = $stmt->fetchAll();
 
-// Get subjects taught count
-$stmt = $pdo->prepare("SELECT COUNT(DISTINCT subject_id) as total FROM schedules WHERE professor_id = ?");
+// Get student's grades for current subjects
+if (!empty($currentSubjects)) {
+    $subjectIds = array_column($currentSubjects, 'id');
+    $placeholders = implode(',', array_fill(0, count($subjectIds), '?'));
+    $stmt = $pdo->prepare("
+        SELECT subject_id, grade, status
+        FROM grades 
+        WHERE student_id = ? AND subject_id IN ($placeholders)
+    ");
+    $params = array_merge([$user['user_id']], $subjectIds);
+    $stmt->execute($params);
+    $subjectGrades = [];
+    while ($row = $stmt->fetch()) {
+        $subjectGrades[$row['subject_id']] = $row;
+    }
+} else {
+    $subjectGrades = [];
+}
+
+// Get ALL passed subjects by the student
+$stmt = $pdo->prepare("
+    SELECT subject_id 
+    FROM grades 
+    WHERE student_id = ? AND status = 'PASSED'
+");
 $stmt->execute([$user['user_id']]);
-$totalSubjects = $stmt->fetch()['total'];
+$passedSubjects = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-// Get today's schedule
-$today = date('l');
-$todaySchedules = array_filter($schedules, function($schedule) use ($today) {
-    return $schedule['day'] == $today;
-});
+// =============================================
+// FIXED LOGIC FOR NEXT SEMESTER SUBJECTS
+// =============================================
+// Determine next year level and next semester based on current
+$nextYearLevel = $user['year_level'];
+$nextSemester = $currentSemester + 1;
+
+// If current semester is 2, then next is next year, 1st semester
+if ($currentSemester == 2) {
+    $nextYearLevel = $user['year_level'] + 1;
+    $nextSemester = 1;
+}
+
+// Check if student is already in 4th year 2nd semester (graduating)
+$isGraduating = ($user['year_level'] == 4 && $currentSemester == 2);
+
+// Get all subjects for next semester
+$stmt = $pdo->prepare("
+    SELECT s.*, 
+           p.prerequisite_id,
+           pre.subject_code as prereq_code,
+           pre.descriptive_title as prereq_title
+    FROM subjects s
+    LEFT JOIN prerequisites p ON s.id = p.subject_id
+    LEFT JOIN subjects pre ON p.prerequisite_id = pre.id
+    WHERE s.course = ? 
+    AND s.year_level = ? 
+    AND s.semester = ?
+    ORDER BY s.subject_code
+");
+$stmt->execute([$user['course'], $nextYearLevel, $nextSemester]);
+$allNextSubjects = $stmt->fetchAll();
+
+// Filter subjects based on prerequisites
+$availableNextSubjects = [];
+$unavailableNextSubjects = [];
+
+foreach ($allNextSubjects as $subject) {
+    // Check if subject has prerequisites
+    if ($subject['prerequisite_id']) {
+        // Check if prerequisite is passed
+        $prereq_passed = in_array($subject['prerequisite_id'], $passedSubjects);
+        
+        if ($prereq_passed) {
+            $availableNextSubjects[] = $subject;
+        } else {
+            $unavailableNextSubjects[] = $subject;
+        }
+    } else {
+        // No prerequisite, subject is available
+        $availableNextSubjects[] = $subject;
+    }
+}
+
+// Remove duplicates (subjects with multiple prerequisites)
+$uniqueAvailable = [];
+$uniqueIds = [];
+foreach ($availableNextSubjects as $subject) {
+    if (!in_array($subject['id'], $uniqueIds)) {
+        $uniqueIds[] = $subject['id'];
+        $uniqueAvailable[] = $subject;
+    }
+}
+$availableNextSubjects = $uniqueAvailable;
+
+// Get announcement/notice
+$stmt = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'announcement'");
+$announcement = $stmt->fetch();
+$announcementText = $announcement ? $announcement['setting_value'] : '';
+
+// Calculate year standing
+$total = $gradeSummary['total_subjects'] ?? 0;
+$passed = $gradeSummary['passed'] ?? 0;
+$yearStanding = $total > 0 ? ($passed / $total) * 100 : 0;
+
+// Calculate total units for available subjects
+$totalAvailableUnits = 0;
+foreach ($availableNextSubjects as $subject) {
+    $totalAvailableUnits += $subject['units'];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Professor Dashboard - Academic Advising System</title>
+    <title>Student Dashboard - Academic Advising System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
-            --primary: #667eea;
-            --secondary: #764ba2;
+            --primary: #00A7E1;
+            --secondary: #F17720;
         }
         .welcome-card {
             background: linear-gradient(135deg, var(--primary), var(--secondary));
@@ -63,86 +167,61 @@ $todaySchedules = array_filter($schedules, function($schedule) use ($today) {
             color: white;
             margin-bottom: 25px;
         }
-        .stat-card {
-            background: white;
-            border-radius: 15px;
-            padding: 20px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-            margin-bottom: 20px;
-            border-left: 4px solid var(--primary);
-        }
-        .schedule-card {
+        .info-card {
             background: white;
             border-radius: 15px;
             padding: 20px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.08);
             margin-bottom: 20px;
         }
-        .schedule-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        .schedule-table th {
-            background: #f8f9fa;
-            padding: 12px 15px;
-            text-align: left;
+        .grade-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
             font-weight: 600;
-            color: #2d3748;
-            border-bottom: 2px solid #e2e8f0;
         }
-        .schedule-table td {
-            padding: 12px 15px;
-            border-bottom: 1px solid #e2e8f0;
-            vertical-align: middle;
-        }
-        .schedule-table tr:hover {
-            background: #f8f9fa;
-        }
-        .today-schedule {
-            background: linear-gradient(135deg, #667eea15, #764ba215);
-            border-left: 4px solid var(--primary);
-        }
-        .btn-add {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            border: none;
-            padding: 8px 20px;
-            border-radius: 25px;
-            color: white;
-        }
-        .btn-add:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102,126,234,0.4);
-            color: white;
-        }
-        .badge-f2f {
+        .grade-passed {
             background: #d4edda;
             color: #155724;
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
         }
-        .badge-online {
-            background: #cce5ff;
-            color: #004085;
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
+        .grade-failed {
+            background: #f8d7da;
+            color: #721c24;
         }
-        .day-badge {
+        .grade-pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .announcement {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+        }
+        .subject-code {
+            font-weight: 700;
+            color: var(--primary);
+        }
+        .prerequisite-warning {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 5px 10px;
+            border-radius: 8px;
+            font-size: 11px;
             display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
         }
-        .day-monday { background: #e8f0fe; color: #1967d2; }
-        .day-tuesday { background: #fce8e6; color: #c5221f; }
-        .day-wednesday { background: #e6f4ea; color: #137333; }
-        .day-thursday { background: #fef7e0; color: #b06000; }
-        .day-friday { background: #f3e8ff; color: #9334e6; }
-        .day-saturday { background: #e0f2fe; color: #0b5e7e; }
+        .badge-available {
+            background: #d4edda;
+            color: #155724;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+        }
+        .badge-not-available {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+        }
     </style>
 </head>
 <body>
@@ -153,8 +232,11 @@ $todaySchedules = array_filter($schedules, function($schedule) use ($today) {
     <div class="welcome-card">
         <div class="row align-items-center">
             <div class="col-md-8">
-                <h2 class="mb-2"><i class="fas fa-chalkboard-teacher me-2"></i>Welcome, Prof. <?php echo htmlspecialchars($user['fullname']); ?>!</h2>
-                <p class="mb-0 opacity-75">Here's your teaching schedule and overview for <?php echo $currentSchoolYear . ' - ' . ($currentSemester == 1 ? '1st Semester' : '2nd Semester'); ?></p>
+                <h2 class="mb-2"><i class="fas fa-user-graduate me-2"></i>Welcome, <?php echo htmlspecialchars($user['fullname']); ?>!</h2>
+                <p class="mb-0 opacity-75">
+                    <?php echo $user['course']; ?> - Year <?php echo $user['year_level']; ?> Section <?php echo $user['section']; ?> | 
+                    <?php echo $currentSchoolYear . ' - ' . ($currentSemester == 1 ? '1st Semester' : '2nd Semester'); ?>
+                </p>
             </div>
             <div class="col-md-4 text-md-end mt-3 mt-md-0">
                 <div class="bg-white bg-opacity-25 rounded p-2 d-inline-block">
@@ -165,124 +247,104 @@ $todaySchedules = array_filter($schedules, function($schedule) use ($today) {
         </div>
     </div>
 
-    <!-- Statistics -->
-    <div class="row">
-        <div class="col-md-4">
-            <div class="stat-card">
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <div class="stat-number" style="font-size: 28px; font-weight: 700;"><?php echo count($schedules); ?></div>
-                        <div class="stat-label text-muted">Total Classes</div>
-                    </div>
-                    <i class="fas fa-calendar-check fa-2x text-primary opacity-50"></i>
-                </div>
+    <!-- Announcement -->
+    <?php if($announcementText): ?>
+    <div class="info-card announcement">
+        <div class="d-flex">
+            <div class="flex-shrink-0">
+                <i class="fas fa-bullhorn fa-2x text-warning"></i>
             </div>
-        </div>
-        <div class="col-md-4">
-            <div class="stat-card">
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <div class="stat-number" style="font-size: 28px; font-weight: 700;"><?php echo $totalSubjects; ?></div>
-                        <div class="stat-label text-muted">Subjects Handled</div>
-                    </div>
-                    <i class="fas fa-book fa-2x text-success opacity-50"></i>
-                </div>
+            <div class="flex-grow-1 ms-3">
+                <h6 class="mb-1">Announcement</h6>
+                <p class="mb-0"><?php echo htmlspecialchars($announcementText); ?></p>
             </div>
-        </div>
-        <div class="col-md-4">
-            <div class="stat-card">
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <div class="stat-number" style="font-size: 28px; font-weight: 700;"><?php echo $totalStudents; ?></div>
-                        <div class="stat-label text-muted">Total Students</div>
-                    </div>
-                    <i class="fas fa-users fa-2x text-info opacity-50"></i>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Today's Schedule Section -->
-    <?php if($todaySchedules): ?>
-    <div class="schedule-card today-schedule">
-        <h5><i class="fas fa-calendar-day me-2 text-primary"></i>Today's Schedule - <?php echo $today; ?></h5>
-        <div class="table-responsive">
-            <table class="schedule-table">
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Subject</th>
-                        <th>Room</th>
-                        <th>Mode</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach($todaySchedules as $schedule): ?>
-                        <tr>
-                            <td><?php echo date('h:i A', strtotime($schedule['start_time'])) . ' - ' . date('h:i A', strtotime($schedule['end_time'])); ?></td>
-                            <td>
-                                <strong><?php echo htmlspecialchars($schedule['subject_code']); ?></strong><br>
-                                <small class="text-muted"><?php echo htmlspecialchars($schedule['descriptive_title']); ?></small>
-                            </td>
-                            <td><i class="fas fa-door-open me-1"></i> <?php echo $schedule['room_code']; ?></td>
-                            <td>
-                                <span class="<?php echo $schedule['mode'] == 'F2F' ? 'badge-f2f' : 'badge-online'; ?>">
-                                    <i class="fas <?php echo $schedule['mode'] == 'F2F' ? 'fa-chalkboard' : 'fa-laptop'; ?> me-1"></i>
-                                    <?php echo $schedule['mode']; ?>
-                                </span>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
         </div>
     </div>
     <?php endif; ?>
 
-    <!-- Complete Schedule Table (Time, Subject, Day, Mode) -->
-    <div class="schedule-card">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5><i class="fas fa-calendar-alt me-2 text-primary"></i>My Complete Schedule</h5>
-            <button class="btn-add" data-bs-toggle="modal" data-bs-target="#addScheduleModal">
-                <i class="fas fa-plus me-1"></i>Add Schedule
-            </button>
+    <!-- Year Standing -->
+    <div class="info-card">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h5 class="mb-1"><i class="fas fa-chart-line me-2 text-primary"></i>Year Standing</h5>
+                <p class="text-muted mb-0">You need at least 75% to proceed to the next year level</p>
+            </div>
+            <div class="text-end">
+                <div class="progress" style="width: 200px; height: 10px;">
+                    <div class="progress-bar bg-success" style="width: <?php echo $yearStanding; ?>%"></div>
+                </div>
+                <div class="mt-1">
+                    <?php if($yearStanding >= 75): ?>
+                        <span class="badge bg-success">
+                            <i class="fas fa-check-circle me-1"></i><?php echo round($yearStanding); ?>% - Eligible
+                        </span>
+                    <?php else: ?>
+                        <span class="badge bg-warning">
+                            <i class="fas fa-exclamation-triangle me-1"></i><?php echo round($yearStanding); ?>% - Need <?php echo round(75 - $yearStanding); ?>% more
+                        </span>
+                    <?php endif; ?>
+                </div>
+            </div>
         </div>
+    </div>
+
+    <!-- Current Subjects for this Semester -->
+    <div class="info-card">
+        <h5><i class="fas fa-book-open me-2 text-primary"></i>Current Subjects - <?php echo $currentSemester == 1 ? '1st Semester' : '2nd Semester'; ?> (Year <?php echo $user['year_level']; ?>)</h5>
         
-        <?php if($schedules): ?>
+        <?php if($currentSubjects): ?>
             <div class="table-responsive">
-                <table class="schedule-table">
+                <table class="table table-hover">
                     <thead>
                         <tr>
-                            <th style="width: 20%;">Time</th>
-                            <th style="width: 35%;">Subject</th>
-                            <th style="width: 20%;">Day</th>
-                            <th style="width: 15%;">Mode</th>
+                            <th>Subject Code</th>
+                            <th>Description</th>
+                            <th>Units</th>
+                            <th>Status</th>
+                            <th>Grade</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach($schedules as $schedule): ?>
+                        <?php foreach($currentSubjects as $subject): ?>
+                            <?php 
+                            $has_grade = isset($subjectGrades[$subject['id']]);
+                            $grade = $has_grade ? $subjectGrades[$subject['id']] : null;
+                            $grade_status = $has_grade ? ($grade['status'] ?? 'PENDING') : 'NOT YET ENCODED';
+                            $grade_value = $has_grade ? $grade['grade'] : null;
+                            ?>
                             <tr>
+                                <td><span class="subject-code"><?php echo htmlspecialchars($subject['subject_code']); ?></span></td>
+                                <td><?php echo htmlspecialchars($subject['descriptive_title']); ?></td>
+                                <td class="text-center"><?php echo $subject['units']; ?></td>
                                 <td>
-                                    <i class="fas fa-clock text-primary me-1"></i>
-                                    <?php echo date('h:i A', strtotime($schedule['start_time'])) . ' - ' . date('h:i A', strtotime($schedule['end_time'])); ?>
+                                    <?php if($has_grade): ?>
+                                        <?php if($grade_status == 'PASSED'): ?>
+                                            <span class="grade-badge grade-passed">
+                                                <i class="fas fa-check-circle me-1"></i>PASSED
+                                            </span>
+                                        <?php elseif($grade_status == 'FAILED'): ?>
+                                            <span class="grade-badge grade-failed">
+                                                <i class="fas fa-times-circle me-1"></i>FAILED
+                                            </span>
+                                        <?php else: ?>
+                                            <span class="grade-badge grade-pending">
+                                                <i class="fas fa-clock me-1"></i>PENDING
+                                            </span>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <span class="grade-badge grade-pending">
+                                            <i class="fas fa-hourglass-half me-1"></i>NOT YET ENCODED
+                                        </span>
+                                    <?php endif; ?>
+                                 </div>
                                 </td>
                                 <td>
-                                    <strong><?php echo htmlspecialchars($schedule['subject_code']); ?></strong><br>
-                                    <small class="text-muted"><?php echo htmlspecialchars($schedule['descriptive_title']); ?></small>
-                                    <br>
-                                    <small><i class="fas fa-door-open me-1 text-muted"></i>Room: <?php echo $schedule['room_code']; ?></small>
-                                </td>
-                                <td>
-                                    <span class="day-badge day-<?php echo strtolower($schedule['day']); ?>">
-                                        <i class="fas fa-calendar-day me-1"></i>
-                                        <?php echo $schedule['day']; ?>
-                                    </span>
-                                </td>
-                                <td>
-                                    <span class="<?php echo $schedule['mode'] == 'F2F' ? 'badge-f2f' : 'badge-online'; ?>">
-                                        <i class="fas <?php echo $schedule['mode'] == 'F2F' ? 'fa-chalkboard' : 'fa-laptop'; ?> me-1"></i>
-                                        <?php echo $schedule['mode']; ?>
-                                    </span>
+                                    <?php if($has_grade && $grade_value): ?>
+                                        <strong><?php echo number_format($grade_value, 2); ?></strong>
+                                    <?php else: ?>
+                                        <span class="text-muted">—</span>
+                                    <?php endif; ?>
+                                 </div>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -290,83 +352,141 @@ $todaySchedules = array_filter($schedules, function($schedule) use ($today) {
                 </table>
             </div>
         <?php else: ?>
-            <div class="text-center py-5">
-                <i class="fas fa-calendar-times fa-3x text-muted mb-3"></i>
-                <p class="text-muted">No schedules found. Click "Add Schedule" to create one.</p>
+            <div class="text-center py-4">
+                <i class="fas fa-info-circle fa-2x text-muted mb-2"></i>
+                <p class="text-muted mb-0">No subjects available for your current year level and semester.</p>
             </div>
         <?php endif; ?>
     </div>
-</div>
 
-<!-- Add Schedule Modal -->
-<div class="modal fade" id="addScheduleModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header bg-primary text-white">
-                <h5 class="modal-title"><i class="fas fa-plus me-2"></i>Add Schedule</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+    <!-- Next Semester Subjects - Available -->
+    <div class="info-card">
+        <?php if($isGraduating): ?>
+    <h5><i class="fas fa-forward me-2 text-primary"></i>Next Semester Subjects</h5>
+<?php else: ?>
+    <h5><i class="fas fa-forward me-2 text-primary"></i>Next Semester Subjects (Year <?php echo $nextYearLevel; ?> - <?php echo $nextSemester == 1 ? '1st Semester' : '2nd Semester'; ?>)</h5>
+<?php endif; ?>
+        
+        <?php if($availableNextSubjects): ?>
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>Subject Code</th>
+                            <th>Description</th>
+                            <th>Units</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach($availableNextSubjects as $subject): ?>
+                            <tr>
+                                <td><span class="subject-code"><?php echo htmlspecialchars($subject['subject_code']); ?></span></td>
+                                <td><?php echo htmlspecialchars($subject['descriptive_title']); ?></td>
+                                <td class="text-center"><?php echo $subject['units']; ?></td>
+                                <td>
+                                    <span class="badge-available">
+                                        <i class="fas fa-check-circle me-1"></i>Available
+                                    </span>
+                                 </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                    <tfoot>
+                        <tr class="table-light">
+                            <td colspan="2" class="text-end fw-bold">Total Units:</td>
+                            <td class="text-center fw-bold"><?php echo $totalAvailableUnits; ?></td>
+                            <td></td>
+                        </tr>
+                    </tfoot>
+                </table>
             </div>
-            <form action="room_management.php" method="POST">
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label">Subject</label>
-                        <select name="subject_id" class="form-select" required>
-                            <option value="">Select Subject</option>
-                            <?php
-                            $stmt = $pdo->query("SELECT id, subject_code, descriptive_title FROM subjects ORDER BY subject_code");
-                            $allSubjects = $stmt->fetchAll();
-                            foreach($allSubjects as $subject): ?>
-                                <option value="<?php echo $subject['id']; ?>"><?php echo $subject['subject_code'] . ' - ' . $subject['descriptive_title']; ?></option>
+        <?php else: ?>
+            <div class="text-center py-4">
+                <i class="fas fa-info-circle fa-2x text-muted mb-2"></i>
+                <p class="text-muted mb-0">No subjects available for next semester.</p>
+                <?php if($isGraduating): ?>
+                    <small class="text-muted">You are on your final semester. Please proceed to the Dean's office for graduation clearance.</small>
+                <?php elseif($nextYearLevel > 4): ?>
+                    <small class="text-muted">You have completed all subjects! You may be eligible for graduation.</small>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+        
+        <?php if($unavailableNextSubjects): ?>
+            <div class="mt-3">
+                <h6 class="text-muted"><i class="fas fa-exclamation-triangle me-2"></i>Subjects Not Available (Prerequisite Required)</h6>
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Subject Code</th>
+                                <th>Description</th>
+                                <th>Units</th>
+                                <th>Required Prerequisite</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php 
+                            $displayedUnavailable = [];
+                            foreach($unavailableNextSubjects as $subject):
+                                if(in_array($subject['id'], $displayedUnavailable)) continue;
+                                $displayedUnavailable[] = $subject['id'];
+                            ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars($subject['subject_code']); ?></td>
+                                    <td><?php echo htmlspecialchars($subject['descriptive_title']); ?></td>
+                                    <td class="text-center"><?php echo $subject['units']; ?></td>
+                                    <td>
+                                        <span class="prerequisite-warning">
+                                            <i class="fas fa-book me-1"></i>
+                                            <?php echo htmlspecialchars($subject['prereq_code'] ?? 'Unknown'); ?>
+                                        </span>
+                                     </div>
+                                    </td>
+                                </tr>
                             <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Day</label>
-                        <select name="day" class="form-select" required>
-                            <option value="">Select Day</option>
-                            <option value="Monday">Monday</option>
-                            <option value="Tuesday">Tuesday</option>
-                            <option value="Wednesday">Wednesday</option>
-                            <option value="Thursday">Thursday</option>
-                            <option value="Friday">Friday</option>
-                            <option value="Saturday">Saturday</option>
-                        </select>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label class="form-label">Start Time</label>
-                            <input type="time" name="start_time" class="form-control" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">End Time</label>
-                            <input type="time" name="end_time" class="form-control" required>
-                        </div>
-                    </div>
-                    <div class="mb-3 mt-3">
-                        <label class="form-label">Room</label>
-                        <select name="room_id" class="form-select" required>
-                            <option value="">Select Room</option>
-                            <?php
-                            $stmt = $pdo->query("SELECT id, room_code FROM rooms WHERE room_type != 'office'");
-                            $rooms = $stmt->fetchAll();
-                            foreach($rooms as $room): ?>
-                                <option value="<?php echo $room['id']; ?>"><?php echo $room['room_code']; ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Mode</label>
-                        <select name="mode" class="form-select" required>
-                            <option value="F2F">Face to Face (F2F)</option>
-                            <option value="Online">Online Class</option>
-                        </select>
-                    </div>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Schedule</button>
-                </div>
-            </form>
+                <small class="text-muted">
+                    <i class="fas fa-info-circle me-1"></i>
+                    You need to pass the prerequisite subjects before you can enroll in these subjects.
+                </small>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- Quick Links -->
+    <div class="info-card">
+        <h5><i class="fas fa-link me-2 text-primary"></i>Quick Links</h5>
+        <div class="row">
+            <div class="col-md-3 col-6 mb-2">
+                <a href="prospectus.php" class="btn btn-outline-primary w-100">
+                    <i class="fas fa-book-open me-1"></i> View Prospectus
+                </a>
+            </div>
+            <div class="col-md-3 col-6 mb-2">
+                <a href="grade_encoding.php" class="btn btn-outline-success w-100">
+                    <i class="fas fa-edit me-1"></i> Encode Grades
+                </a>
+            </div>
+            <div class="col-md-3 col-6 mb-2">
+                <a href="professor_schedule.php" class="btn btn-outline-info w-100">
+                    <i class="fas fa-chalkboard-teacher me-1"></i> Professor Schedule
+                </a>
+            </div>
+            <div class="col-md-3 col-6 mb-2">
+                <a href="room_availability.php" class="btn btn-outline-warning w-100">
+                    <i class="fas fa-door-open me-1"></i> Room Availability
+                </a>
+            </div>
+            <div class="col-md-3 col-6 mb-2">
+                <a href="advising_report.php" class="btn btn-outline-primary w-100">
+                    <i class="fas fa-file-alt me-1"></i> Advising Report
+                </a>
+            </div>
         </div>
     </div>
 </div>

@@ -1,116 +1,70 @@
 <?php
 require_once '../includes/auth.php';
-requireRole('admin');
+requireRole('student');
 
-// Handle schedule operations
-$message = '';
-$error = '';
+$user = getUserData($_SESSION['user_id']);
 
-// Add schedule
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-    if ($_POST['action'] === 'add') {
-        $professor_id = $_POST['professor_id'];
-        $subject_id = $_POST['subject_id'];
-        $room_id = $_POST['room_id'];
-        $day = $_POST['day'];
-        $start_time = $_POST['start_time'];
-        $end_time = $_POST['end_time'];
-        $mode = $_POST['mode'];
-        $school_year = $_POST['school_year'] ?? '2024-2025';
-        $semester = $_POST['semester'] ?? '1';
-        
-        // Check for schedule conflict
-        $stmt = $pdo->prepare("
-            SELECT * FROM schedules 
-            WHERE day = ? AND room_id = ? 
-            AND ((start_time <= ? AND end_time > ?) OR (start_time < ? AND end_time >= ?))
-        ");
-        $stmt->execute([$day, $room_id, $start_time, $start_time, $end_time, $end_time]);
-        
-        if ($stmt->rowCount() > 0) {
-            $error = "Schedule conflict! The room is already booked at this time.";
-        } else {
-            $stmt = $pdo->prepare("
-                INSERT INTO schedules (professor_id, subject_id, room_id, day, start_time, end_time, mode, school_year, semester)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ");
-            if ($stmt->execute([$professor_id, $subject_id, $room_id, $day, $start_time, $end_time, $mode, $school_year, $semester])) {
-                $message = "Schedule added successfully!";
-            } else {
-                $error = "Failed to add schedule.";
-            }
-        }
-    }
-    
-    // Edit schedule
-    if ($_POST['action'] === 'edit') {
-        $id = $_POST['id'];
-        $professor_id = $_POST['professor_id'];
-        $subject_id = $_POST['subject_id'];
-        $room_id = $_POST['room_id'];
-        $day = $_POST['day'];
-        $start_time = $_POST['start_time'];
-        $end_time = $_POST['end_time'];
-        $mode = $_POST['mode'];
-        
-        $stmt = $pdo->prepare("
-            UPDATE schedules 
-            SET professor_id = ?, subject_id = ?, room_id = ?, day = ?, start_time = ?, end_time = ?, mode = ?
-            WHERE id = ?
-        ");
-        if ($stmt->execute([$professor_id, $subject_id, $room_id, $day, $start_time, $end_time, $mode, $id])) {
-            $message = "Schedule updated successfully!";
-        } else {
-            $error = "Failed to update schedule.";
-        }
-    }
-    
-    // Delete schedule
-    if ($_POST['action'] === 'delete') {
-        $id = $_POST['id'];
-        $stmt = $pdo->prepare("DELETE FROM schedules WHERE id = ?");
-        if ($stmt->execute([$id])) {
-            $message = "Schedule deleted successfully!";
-        } else {
-            $error = "Failed to delete schedule.";
-        }
-    }
+// Get search parameter
+$search = $_GET['search'] ?? '';
+$selected_professor = $_GET['professor_id'] ?? '';
+
+// Get all professors
+if (!empty($search)) {
+    $stmt = $pdo->prepare("
+        SELECT user_id, fullname, email, picture 
+        FROM users 
+        WHERE role = 'professor' AND status = 'active' 
+        AND (fullname LIKE ? OR user_id LIKE ? OR email LIKE ?)
+        ORDER BY fullname
+    ");
+    $search_param = "%$search%";
+    $stmt->execute([$search_param, $search_param, $search_param]);
+} else {
+    $stmt = $pdo->query("
+        SELECT user_id, fullname, email, picture 
+        FROM users 
+        WHERE role = 'professor' AND status = 'active' 
+        ORDER BY fullname
+    ");
 }
-
-// Get all schedules with details
-$stmt = $pdo->query("
-    SELECT s.*, 
-           u.user_id as professor_user_id, u.fullname as professor_name,
-           sub.subject_code, sub.descriptive_title,
-           r.room_code
-    FROM schedules s
-    JOIN users u ON s.professor_id = u.user_id
-    JOIN subjects sub ON s.subject_id = sub.id
-    JOIN rooms r ON s.room_id = r.id
-    ORDER BY FIELD(s.day, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'), s.start_time
-");
-$schedules = $stmt->fetchAll();
-
-// Get professors for dropdown
-$stmt = $pdo->query("SELECT user_id, fullname FROM users WHERE role = 'professor' AND status = 'active' ORDER BY fullname");
 $professors = $stmt->fetchAll();
 
-// Get subjects for dropdown
-$stmt = $pdo->query("SELECT id, subject_code, descriptive_title FROM subjects ORDER BY subject_code");
-$subjects = $stmt->fetchAll();
+// If no professor selected and there are professors, select the first one
+if (empty($selected_professor) && !empty($professors)) {
+    $selected_professor = $professors[0]['user_id'];
+}
 
-// Get rooms for dropdown
-$stmt = $pdo->query("SELECT id, room_code FROM rooms WHERE room_type != 'office' ORDER BY room_code");
-$rooms = $stmt->fetchAll();
+// Get schedules for selected professor
+$schedules = [];
+$professor_info = null;
 
-$days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+if ($selected_professor) {
+    // Get professor info
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE user_id = ? AND role = 'professor'");
+    $stmt->execute([$selected_professor]);
+    $professor_info = $stmt->fetch();
+    
+    // Get schedules with professor_note
+    $stmt = $pdo->prepare("
+        SELECT s.*, 
+               sub.subject_code, sub.descriptive_title, sub.units,
+               r.room_code, r.room_type
+        FROM schedules s
+        JOIN subjects sub ON s.subject_id = sub.id
+        JOIN rooms r ON s.room_id = r.id
+        WHERE s.professor_id = ?
+        ORDER BY FIELD(s.day, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'), s.start_time
+    ");
+    $stmt->execute([$selected_professor]);
+    $schedules = $stmt->fetchAll();
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Professor Schedule Management - Admin</title>
+    <title>Professor Schedule - Academic Advising System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -118,38 +72,83 @@ $days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             --primary: #667eea;
             --secondary: #764ba2;
         }
-        .content-card {
+        .schedule-card {
             background: white;
             border-radius: 15px;
-            padding: 25px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-            margin-bottom: 20px;
+            padding: 25px;
+            margin-bottom: 25px;
         }
-        .btn-add {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            border: none;
-            padding: 10px 25px;
-            border-radius: 25px;
-            color: white;
+        .professor-card {
+            background: white;
+            border-radius: 12px;
+            padding: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+            margin-bottom: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }
-        .btn-add:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102,126,234,0.4);
-            color: white;
+        .professor-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .professor-card.active {
+            border-color: var(--primary);
+            background: linear-gradient(135deg, #667eea10, #764ba210);
+        }
+        .professor-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+        .professor-name {
+            font-weight: 600;
+            color: #2d3748;
+        }
+        .professor-email {
+            font-size: 12px;
+            color: #718096;
+        }
+        .schedule-table {
+            width: 100%;
+            border-collapse: collapse;
         }
         .schedule-table th {
             background: #f8f9fa;
-            padding: 12px;
+            padding: 12px 15px;
+            text-align: left;
             font-weight: 600;
+            color: #2d3748;
+            border-bottom: 2px solid #e2e8f0;
         }
         .schedule-table td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e2e8f0;
             vertical-align: middle;
-            padding: 12px;
+        }
+        .schedule-table tr:hover {
+            background: #f8f9fa;
+        }
+        /* FULL ROW RED background when professor note exists */
+        .schedule-row-with-note {
+            background-color: #f8d7da !important;
+        }
+        .schedule-row-with-note:hover {
+            background-color: #f5c6cb !important;
+        }
+        .schedule-row-with-note td {
+            background-color: #f8d7da !important;
+        }
+        .schedule-row-with-note:hover td {
+            background-color: #f5c6cb !important;
         }
         .status-badge {
-            padding: 4px 10px;
+            display: inline-block;
+            padding: 4px 12px;
             border-radius: 20px;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
         }
         .status-f2f {
@@ -160,25 +159,67 @@ $days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             background: #cce5ff;
             color: #004085;
         }
-        .btn-action {
-            padding: 5px 10px;
-            margin: 0 3px;
-            border-radius: 8px;
+        .day-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
             font-size: 12px;
+            font-weight: 600;
         }
-        .modal-header {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            color: white;
-        }
-        .modal-header .btn-close {
-            filter: brightness(0) invert(1);
-        }
+        .day-monday { background: #e8f0fe; color: #1967d2; }
+        .day-tuesday { background: #fce8e6; color: #c5221f; }
+        .day-wednesday { background: #e6f4ea; color: #137333; }
+        .day-thursday { background: #fef7e0; color: #b06000; }
+        .day-friday { background: #f3e8ff; color: #9334e6; }
+        .day-saturday { background: #e0f2fe; color: #0b5e7e; }
         .search-box {
             margin-bottom: 20px;
+        }
+        .professor-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+        }
+        .professor-header {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 25px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .professor-header-img {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+        .professor-note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            max-width: 250px;
+        }
+        .professor-note i {
+            color: #ffc107;
+            margin-right: 5px;
         }
         @media (max-width: 768px) {
             .schedule-table {
                 font-size: 12px;
+            }
+            .professor-header {
+                flex-direction: column;
+                text-align: center;
+            }
+            .professor-note {
+                max-width: 180px;
             }
         }
     </style>
@@ -187,305 +228,162 @@ $days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 <?php include '../includes/sidebar.php'; ?>
 
 <div class="container-fluid">
-    <div class="content-card">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h2><i class="fas fa-chalkboard-teacher me-2 text-primary"></i>Professor Schedule Management</h2>
-            <button class="btn-add" data-bs-toggle="modal" data-bs-target="#addScheduleModal">
-                <i class="fas fa-plus me-2"></i>Add Schedule
-            </button>
-        </div>
+    <div class="schedule-card">
+        <h3><i class="fas fa-chalkboard-teacher me-2 text-primary"></i>Professor Schedule</h3>
+        <p class="text-muted">Search and view schedules of professors</p>
+    </div>
 
-        <?php if($message): ?>
-            <div class="alert alert-success alert-dismissible fade show" role="alert">
-                <i class="fas fa-check-circle me-2"></i><?php echo $message; ?>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        <?php endif; ?>
-
-        <?php if($error): ?>
-            <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                <i class="fas fa-exclamation-circle me-2"></i><?php echo $error; ?>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        <?php endif; ?>
-
-        <!-- Search Box -->
-        <div class="search-box">
-            <div class="input-group" style="max-width: 300px;">
-                <span class="input-group-text"><i class="fas fa-search"></i></span>
-                <input type="text" id="searchInput" class="form-control" placeholder="Search by professor, subject, or room...">
-            </div>
-        </div>
-
-        <!-- Schedules Table -->
-        <div class="table-responsive">
-            <table class="table table-hover schedule-table" id="scheduleTable">
-                <thead>
-                    <tr>
-                        <th>Professor</th>
-                        <th>Subject</th>
-                        <th>Day</th>
-                        <th>Time</th>
-                        <th>Room</th>
-                        <th>Mode</th>
-                        <th>School Year</th>
-                        <th>Semester</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach($schedules as $schedule): ?>
-                        <tr>
-                            <td>
-                                <strong><?php echo htmlspecialchars($schedule['professor_name']); ?></strong><br>
-                                <small class="text-muted"><?php echo htmlspecialchars($schedule['professor_user_id']); ?></small>
-                            </td>
-                            <td>
-                                <strong><?php echo htmlspecialchars($schedule['subject_code']); ?></strong><br>
-                                <small class="text-muted"><?php echo htmlspecialchars($schedule['descriptive_title']); ?></small>
-                            </td>
-                            <td><?php echo $schedule['day']; ?></td>
-                            <td>
-                                <?php echo date('h:i A', strtotime($schedule['start_time'])); ?> - 
-                                <?php echo date('h:i A', strtotime($schedule['end_time'])); ?>
-                            </td>
-                            <td><?php echo $schedule['room_code']; ?></td>
-                            <td>
-                                <span class="status-badge status-<?php echo strtolower($schedule['mode']); ?>">
-                                    <?php echo $schedule['mode']; ?>
-                                </span>
-                            </td>
-                            <td><?php echo $schedule['school_year']; ?></td>
-                            <td><?php echo $schedule['semester'] == 1 ? '1st' : '2nd'; ?></td>
-                            <td>
-                                <button class="btn btn-sm btn-primary btn-action" onclick="editSchedule(<?php echo $schedule['id']; ?>, '<?php echo htmlspecialchars($schedule['professor_user_id']); ?>', <?php echo $schedule['subject_id']; ?>, <?php echo $schedule['room_id']; ?>, '<?php echo $schedule['day']; ?>', '<?php echo $schedule['start_time']; ?>', '<?php echo $schedule['end_time']; ?>', '<?php echo $schedule['mode']; ?>')">
-                                    <i class="fas fa-edit"></i>
-                                </button>
-                                <button class="btn btn-sm btn-danger btn-action" onclick="deleteSchedule(<?php echo $schedule['id']; ?>, '<?php echo htmlspecialchars($schedule['subject_code']); ?>')">
-                                    <i class="fas fa-trash"></i>
-                                </button>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    
-                    <?php if(empty($schedules)): ?>
-                        <tr>
-                            <td colspan="9" class="text-center py-4">No schedules found.</td>
-                        </tr>
+    <div class="row">
+        <!-- Professor List Sidebar -->
+        <div class="col-md-4">
+            <div class="schedule-card">
+                <h5><i class="fas fa-users me-2 text-primary"></i>Professors</h5>
+                
+                <!-- Search Box -->
+                <div class="search-box">
+                    <form method="GET" action="">
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-search"></i></span>
+                            <input type="text" name="search" class="form-control" placeholder="Search by name, ID, or email..." value="<?php echo htmlspecialchars($search); ?>">
+                            <?php if(!empty($search)): ?>
+                                <a href="professor_schedule.php" class="btn btn-outline-secondary">
+                                    <i class="fas fa-times"></i>
+                                </a>
+                            <?php endif; ?>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-search"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                
+                <!-- Professor List -->
+                <div class="professor-list">
+                    <?php if($professors): ?>
+                        <?php foreach($professors as $prof): ?>
+                            <div class="professor-card <?php echo $selected_professor == $prof['user_id'] ? 'active' : ''; ?>" 
+                                 onclick="location.href='?professor_id=<?php echo urlencode($prof['user_id']); ?>&search=<?php echo urlencode($search); ?>'">
+                                <div class="d-flex align-items-center">
+                                    <?php 
+                                    $prof_picture = '../uploads/professors/' . ($prof['picture'] ?? 'default.png');
+                                    if (!file_exists($prof_picture)) {
+                                        $prof_picture = '../uploads/professors/default.png';
+                                    }
+                                    ?>
+                                    <img src="<?php echo $prof_picture; ?>" alt="<?php echo htmlspecialchars($prof['fullname']); ?>" class="professor-avatar me-3">
+                                    <div>
+                                        <div class="professor-name"><?php echo htmlspecialchars($prof['fullname']); ?></div>
+                                        <div class="professor-email"><?php echo htmlspecialchars($prof['email']); ?></div>
+                                        <div class="professor-email">ID: <?php echo htmlspecialchars($prof['user_id']); ?></div>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="no-results">
+                            <i class="fas fa-user-slash fa-2x mb-2"></i>
+                            <p>No professors found matching your search.</p>
+                        </div>
                     <?php endif; ?>
-                </tbody>
-            </table>
+                </div>
+            </div>
         </div>
-    </div>
-</div>
 
-<!-- Add Schedule Modal -->
-<div class="modal fade" id="addScheduleModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title"><i class="fas fa-plus me-2"></i>Add Schedule</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST">
-                <div class="modal-body">
-                    <input type="hidden" name="action" value="add">
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Professor <span class="text-danger">*</span></label>
-                        <select name="professor_id" class="form-select" required>
-                            <option value="">Select Professor</option>
-                            <?php foreach($professors as $prof): ?>
-                                <option value="<?php echo htmlspecialchars($prof['user_id']); ?>">
-                                    <?php echo htmlspecialchars($prof['fullname']); ?> (<?php echo htmlspecialchars($prof['user_id']); ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Subject <span class="text-danger">*</span></label>
-                        <select name="subject_id" class="form-select" required>
-                            <option value="">Select Subject</option>
-                            <?php foreach($subjects as $subject): ?>
-                                <option value="<?php echo $subject['id']; ?>">
-                                    <?php echo htmlspecialchars($subject['subject_code']); ?> - <?php echo htmlspecialchars($subject['descriptive_title']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Room <span class="text-danger">*</span></label>
-                        <select name="room_id" class="form-select" required>
-                            <option value="">Select Room</option>
-                            <?php foreach($rooms as $room): ?>
-                                <option value="<?php echo $room['id']; ?>"><?php echo $room['room_code']; ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Day <span class="text-danger">*</span></label>
-                        <select name="day" class="form-select" required>
-                            <option value="">Select Day</option>
-                            <option value="Monday">Monday</option>
-                            <option value="Tuesday">Tuesday</option>
-                            <option value="Wednesday">Wednesday</option>
-                            <option value="Thursday">Thursday</option>
-                            <option value="Friday">Friday</option>
-                            <option value="Saturday">Saturday</option>
-                        </select>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label class="form-label">Start Time <span class="text-danger">*</span></label>
-                            <input type="time" name="start_time" class="form-control" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">End Time <span class="text-danger">*</span></label>
-                            <input type="time" name="end_time" class="form-control" required>
+        <!-- Schedule Display -->
+        <div class="col-md-8">
+            <div class="schedule-card">
+                <?php if($professor_info): ?>
+                    <!-- Professor Header -->
+                    <div class="professor-header">
+                        <?php 
+                        $prof_picture = '../uploads/professors/' . ($professor_info['picture'] ?? 'default.png');
+                        if (!file_exists($prof_picture)) {
+                            $prof_picture = '../uploads/professors/default.png';
+                        }
+                        ?>
+                        <img src="<?php echo $prof_picture; ?>" alt="<?php echo htmlspecialchars($professor_info['fullname']); ?>" class="professor-header-img">
+                        <div>
+                            <h4 class="mb-1"><?php echo htmlspecialchars($professor_info['fullname']); ?></h4>
+                            <p class="text-muted mb-1">
+                                <i class="fas fa-envelope me-1"></i><?php echo htmlspecialchars($professor_info['email']); ?>
+                            </p>
+                            <p class="text-muted mb-0">
+                                <i class="fas fa-id-card me-1"></i><?php echo htmlspecialchars($professor_info['user_id']); ?>
+                            </p>
                         </div>
                     </div>
                     
-                    <div class="mb-3 mt-3">
-                        <label class="form-label">Mode <span class="text-danger">*</span></label>
-                        <select name="mode" class="form-select" required>
-                            <option value="F2F">Face to Face (F2F)</option>
-                            <option value="Online">Online Class</option>
-                        </select>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label class="form-label">School Year</label>
-                            <input type="text" name="school_year" class="form-control" value="2024-2025">
+                    <!-- Schedule Table -->
+                    <?php if($schedules): ?>
+                        <h5 class="mb-3"><i class="fas fa-calendar-alt me-2 text-primary"></i>Class Schedule</h5>
+                        <div class="table-responsive">
+                            <table class="schedule-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Subject</th>
+                                        <th>Day</th>
+                                        <th>Room</th>
+                                        <th>Mode</th>
+                                        <th>Professor Note</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach($schedules as $schedule): ?>
+                                        <tr class="<?php echo (!empty($schedule['professor_note'])) ? 'schedule-row-with-note' : ''; ?>">
+                                            <td>
+                                                <i class="fas fa-clock text-primary me-1"></i>
+                                                <?php echo date('h:i A', strtotime($schedule['start_time'])) . ' - ' . date('h:i A', strtotime($schedule['end_time'])); ?>
+                                             </div>
+                                            </td>
+                                            <td>
+                                                <strong><?php echo htmlspecialchars($schedule['subject_code']); ?></strong><br>
+                                                <small class="text-muted"><?php echo htmlspecialchars($schedule['descriptive_title']); ?></small>
+                                             </div>
+                                            <td>
+                                                <span class="day-badge day-<?php echo strtolower($schedule['day']); ?>">
+                                                    <i class="fas fa-calendar-day me-1"></i>
+                                                    <?php echo $schedule['day']; ?>
+                                                </span>
+                                             </div>
+                                            <td>
+                                                <i class="fas fa-door-open me-1 text-muted"></i>
+                                                <?php echo $schedule['room_code']; ?>
+                                             </div>
+                                            <td>
+                                                <span class="status-badge status-<?php echo strtolower($schedule['mode']); ?>">
+                                                    <i class="fas <?php echo $schedule['mode'] == 'F2F' ? 'fa-chalkboard' : 'fa-laptop'; ?> me-1"></i>
+                                                    <?php echo $schedule['mode']; ?>
+                                                </span>
+                                             </div>
+                                            <td>
+                                                <?php if(!empty($schedule['professor_note'])): ?>
+                                                    <div class="professor-note">
+                                                        <i class="fas fa-sticky-note"></i>
+                                                        <?php echo nl2br(htmlspecialchars($schedule['professor_note'])); ?>
+                                                    </div>
+                                                <?php else: ?>
+                                                    <span class="text-muted">—</span>
+                                                <?php endif; ?>
+                                             </div>
+                                         </div>
+                                    <?php endforeach; ?>
+                                </tbody>
+                             </div>
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Semester</label>
-                            <select name="semester" class="form-select">
-                                <option value="1">1st Semester</option>
-                                <option value="2">2nd Semester</option>
-                            </select>
+                    <?php else: ?>
+                        <div class="no-results">
+                            <i class="fas fa-calendar-times fa-3x mb-3"></i>
+                            <p class="text-muted">No schedule found for this professor.</p>
                         </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Schedule</button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Edit Schedule Modal -->
-<div class="modal fade" id="editScheduleModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title"><i class="fas fa-edit me-2"></i>Edit Schedule</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST" id="editForm">
-                <div class="modal-body">
-                    <input type="hidden" name="action" value="edit">
-                    <input type="hidden" name="id" id="editId">
+                    <?php endif; ?>
                     
-                    <div class="mb-3">
-                        <label class="form-label">Professor <span class="text-danger">*</span></label>
-                        <select name="professor_id" id="editProfessorId" class="form-select" required>
-                            <option value="">Select Professor</option>
-                            <?php foreach($professors as $prof): ?>
-                                <option value="<?php echo htmlspecialchars($prof['user_id']); ?>">
-                                    <?php echo htmlspecialchars($prof['fullname']); ?> (<?php echo htmlspecialchars($prof['user_id']); ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
+                <?php else: ?>
+                    <div class="no-results">
+                        <i class="fas fa-chalkboard-teacher fa-3x mb-3"></i>
+                        <p class="text-muted">Select a professor from the left to view their schedule.</p>
                     </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Subject <span class="text-danger">*</span></label>
-                        <select name="subject_id" id="editSubjectId" class="form-select" required>
-                            <option value="">Select Subject</option>
-                            <?php foreach($subjects as $subject): ?>
-                                <option value="<?php echo $subject['id']; ?>">
-                                    <?php echo htmlspecialchars($subject['subject_code']); ?> - <?php echo htmlspecialchars($subject['descriptive_title']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Room <span class="text-danger">*</span></label>
-                        <select name="room_id" id="editRoomId" class="form-select" required>
-                            <option value="">Select Room</option>
-                            <?php foreach($rooms as $room): ?>
-                                <option value="<?php echo $room['id']; ?>"><?php echo $room['room_code']; ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Day <span class="text-danger">*</span></label>
-                        <select name="day" id="editDay" class="form-select" required>
-                            <option value="Monday">Monday</option>
-                            <option value="Tuesday">Tuesday</option>
-                            <option value="Wednesday">Wednesday</option>
-                            <option value="Thursday">Thursday</option>
-                            <option value="Friday">Friday</option>
-                            <option value="Saturday">Saturday</option>
-                        </select>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label class="form-label">Start Time <span class="text-danger">*</span></label>
-                            <input type="time" name="start_time" id="editStartTime" class="form-control" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">End Time <span class="text-danger">*</span></label>
-                            <input type="time" name="end_time" id="editEndTime" class="form-control" required>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3 mt-3">
-                        <label class="form-label">Mode <span class="text-danger">*</span></label>
-                        <select name="mode" id="editMode" class="form-select" required>
-                            <option value="F2F">Face to Face (F2F)</option>
-                            <option value="Online">Online Class</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Delete Confirmation Modal -->
-<div class="modal fade" id="deleteModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header bg-danger text-white">
-                <h5 class="modal-title"><i class="fas fa-exclamation-triangle me-2"></i>Confirm Delete</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p>Are you sure you want to delete the schedule for <strong id="deleteItemName"></strong>?</p>
-                <p class="text-danger">This action cannot be undone!</p>
-            </div>
-            <div class="modal-footer">
-                <form method="POST">
-                    <input type="hidden" name="action" value="delete">
-                    <input type="hidden" name="id" id="deleteId">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-danger">Delete</button>
-                </form>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -493,34 +391,3 @@ $days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-    // Search functionality
-    $('#searchInput').on('keyup', function() {
-        const searchTerm = $(this).val().toLowerCase();
-        $('#scheduleTable tbody tr').each(function() {
-            const text = $(this).text().toLowerCase();
-            $(this).toggle(text.includes(searchTerm));
-        });
-    });
-    
-    // Edit schedule function
-    function editSchedule(id, professorId, subjectId, roomId, day, startTime, endTime, mode) {
-        document.getElementById('editId').value = id;
-        document.getElementById('editProfessorId').value = professorId;
-        document.getElementById('editSubjectId').value = subjectId;
-        document.getElementById('editRoomId').value = roomId;
-        document.getElementById('editDay').value = day;
-        document.getElementById('editStartTime').value = startTime;
-        document.getElementById('editEndTime').value = endTime;
-        document.getElementById('editMode').value = mode;
-        
-        new bootstrap.Modal(document.getElementById('editScheduleModal')).show();
-    }
-    
-    // Delete schedule function
-    function deleteSchedule(id, subjectName) {
-        document.getElementById('deleteItemName').textContent = subjectName;
-        document.getElementById('deleteId').value = id;
-        new bootstrap.Modal(document.getElementById('deleteModal')).show();
-    }
-</script>
